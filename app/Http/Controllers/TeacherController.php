@@ -2,9 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\DailyChallengeConfig;
+use App\Models\Feedback;
 use App\Models\Game;
 use App\Models\GameSession;
 use App\Models\DailyChallenge;
+use App\Models\Question;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -287,14 +290,124 @@ class TeacherController extends Controller
         return redirect()->route('teacher.admins.index')->with('status', 'Teacher deleted.');
     }
 
-    public function reports()
+    public function reports(Request $request)
     {
-        return view('teacher.reports');
+        $totalStudents = User::where('role', 'student')->count();
+        $totalSessions = GameSession::count();
+        $avgScore = GameSession::avg('score') ?? 0;
+
+        // Success rate: sessions with score > 50% of max (assume max ~100)
+        $totalWithScore = GameSession::count();
+        $passing = GameSession::where('score', '>=', 50)->count();
+        $successRate = $totalWithScore > 0 ? $passing / $totalWithScore : 0;
+
+        $students = collect();
+        $games = collect();
+        $questions = collect();
+
+        if ($request->get('type') === 'student') {
+            $students = User::where('role', 'student')
+                ->withCount('gameSessions')
+                ->withAvg('gameSessions', 'score')
+                ->paginate(15)
+                ->withQueryString();
+        } elseif ($request->get('type') === 'game') {
+            $games = Game::withCount('sessions')
+                ->withAvg('sessions', 'score')
+                ->get();
+        } elseif ($request->get('type') === 'question') {
+            $questions = Question::withCount(['practiceAnswers as total_attempts'])
+                ->withCount(['practiceAnswers as correct_count' => function ($q) {
+                    $q->where('is_correct', true);
+                }])
+                ->paginate(15)
+                ->withQueryString();
+        }
+
+        // Activity over last 30 days
+        $activityRaw = GameSession::select(DB::raw('DATE(created_at) as date'), DB::raw('count(*) as count'))
+            ->where('created_at', '>=', now()->subDays(30))
+            ->groupBy('date')
+            ->orderBy('date')
+            ->pluck('count', 'date');
+
+        $activityLabels = [];
+        $activityValues = [];
+        for ($i = 29; $i >= 0; $i--) {
+            $d = now()->subDays($i)->toDateString();
+            $activityLabels[] = \Carbon\Carbon::parse($d)->format('M d');
+            $activityValues[] = $activityRaw[$d] ?? 0;
+        }
+
+        // Top students by average score
+        $topStudents = User::where('role', 'student')
+            ->whereHas('gameSessions')
+            ->withCount('gameSessions as sessions_count')
+            ->withAvg('gameSessions as avg_score', 'score')
+            ->orderByDesc('avg_score')
+            ->take(5)
+            ->get();
+
+        return view('teacher.reports', compact(
+            'totalStudents',
+            'totalSessions',
+            'avgScore',
+            'successRate',
+            'students',
+            'games',
+            'questions',
+            'activityLabels',
+            'activityValues',
+            'topStudents'
+        ));
     }
 
-    public function feedback()
+    public function feedback(Request $request)
     {
-        return view('teacher.feedback');
+        $query = Feedback::with('user')->latest();
+
+        if ($request->filled('q')) {
+            $q = $request->get('q');
+            $query->where(function ($builder) use ($q) {
+                $builder->where('message', 'like', "%{$q}%")
+                    ->orWhereHas('user', function ($userQuery) use ($q) {
+                        $userQuery->where('name', 'like', "%{$q}%")
+                            ->orWhere('email', 'like', "%{$q}%");
+                    });
+            });
+        }
+
+        $feedbacks = $query->paginate(15)->withQueryString();
+
+        // Compute stats from the full dataset (not just the current page)
+        $totalFeedback = Feedback::count();
+        $recentFeedback = Feedback::where('created_at', '>', now()->subDays(7))->count();
+        $resolvedFeedback = Feedback::where('status', 'resolved')->count();
+
+        return view('teacher.feedback', compact('feedbacks', 'totalFeedback', 'recentFeedback', 'resolvedFeedback'));
+    }
+
+    /**
+     * Mark feedback as resolved
+     */
+    public function feedbackResolve(Feedback $feedback)
+    {
+        $feedback->update(['status' => 'resolved']);
+        return response()->json(['success' => true]);
+    }
+
+    /**
+     * Delete feedback
+     */
+    public function feedbackDestroy(Feedback $feedback)
+    {
+        $feedback->delete();
+
+        if (request()->wantsJson()) {
+            return response()->json(['success' => true]);
+        }
+
+        return redirect()->route('teacher.feedback')->with('status', 'Feedback deleted.');
     }
 
     /**
@@ -335,13 +448,23 @@ class TeacherController extends Controller
         
         // Get students for filter dropdown
         $students = User::where('role', 'student')->pluck('name', 'id');
+
+        // Get scheduled challenges (configs) for the schedule tab
+        $scheduledChallenges = DailyChallengeConfig::with('game')
+            ->orderBy('date')
+            ->get();
+
+        // Get available games for the schedule form
+        $availableGames = Game::where('is_active', true)->get();
         
         return view('teacher.daily-challenges', compact(
             'challenges',
             'totalAttempts',
             'completedToday',
             'averageScoreToday',
-            'students'
+            'students',
+            'scheduledChallenges',
+            'availableGames'
         ));
     }
 
@@ -481,20 +604,100 @@ class TeacherController extends Controller
         return response()->json([
             'question' => [
                 'id' => $question->id,
-                'body' => $question->body,
-                'answer' => $question->answer,
-                'options' => $question->options,
+                'body' => $question->content,
+                'answer' => $question->correct_answer,
+                'options' => $question->choices,
             ],
             'challenge' => [
                 'id' => $challenge->id,
                 'submitted_answer' => $challenge->submitted_answer,
-                'correct_answer' => $question->answer,
+                'correct_answer' => $question->correct_answer,
                 'is_correct' => $challenge->is_correct,
                 'score' => $challenge->score,
                 'attempt_number' => $challenge->attempt_number,
                 'created_at' => $challenge->created_at,
                 'question_performance' => $questionPerformance,
             ],
+        ]);
+    }
+
+    /**
+     * Store a new daily challenge config (schedule)
+     */
+    public function dailyChallengesStore(Request $request)
+    {
+        $validated = $request->validate([
+            'date' => ['required', 'date', 'unique:daily_challenge_configs,date'],
+            'game_id' => ['required', 'exists:games,id'],
+        ]);
+
+        DailyChallengeConfig::create($validated);
+
+        return redirect()->route('teacher.daily-challenges.index')->with('status', 'Challenge scheduled.');
+    }
+
+    /**
+     * Update a daily challenge config
+     */
+    public function dailyChallengesUpdate(Request $request, DailyChallengeConfig $config)
+    {
+        $validated = $request->validate([
+            'date' => ['required', 'date', 'unique:daily_challenge_configs,date,' . $config->id],
+            'game_id' => ['required', 'exists:games,id'],
+        ]);
+
+        $config->update($validated);
+
+        return redirect()->route('teacher.daily-challenges.index')->with('status', 'Challenge schedule updated.');
+    }
+
+    /**
+     * Delete a daily challenge config
+     */
+    public function dailyChallengesDestroy(DailyChallengeConfig $config)
+    {
+        $config->delete();
+
+        return redirect()->route('teacher.daily-challenges.index')->with('status', 'Scheduled challenge removed.');
+    }
+
+    /**
+     * Delete a daily challenge attempt
+     */
+    public function dailyChallengeDestroy(DailyChallenge $challenge)
+    {
+        $challenge->delete();
+
+        return redirect()->route('teacher.daily-challenges.index')->with('status', 'Challenge attempt deleted.');
+    }
+
+    /**
+     * Get details of a daily challenge attempt (JSON)
+     */
+    public function getChallengeDetails(DailyChallenge $challenge)
+    {
+        $challenge->load(['user', 'game', 'question']);
+
+        return response()->json([
+            'id' => $challenge->id,
+            'student' => $challenge->user ? [
+                'name' => $challenge->user->name,
+                'email' => $challenge->user->email,
+            ] : null,
+            'game' => $challenge->game ? $challenge->game->name : 'Unknown',
+            'question' => $challenge->question ? [
+                'content' => $challenge->question->content,
+                'correct_answer' => $challenge->question->correct_answer,
+                'choices' => $challenge->question->choices,
+            ] : null,
+            'submitted_answer' => $challenge->submitted_answer,
+            'is_correct' => $challenge->is_correct,
+            'score' => $challenge->score,
+            'duration' => $challenge->duration,
+            'attempt_number' => $challenge->attempt_number,
+            'completed_at' => $challenge->completed_at?->toIso8601String(),
+            'created_at' => $challenge->created_at->toIso8601String(),
+            'metadata' => $challenge->metadata,
         ]);
     }
 }

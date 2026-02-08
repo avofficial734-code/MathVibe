@@ -16,6 +16,7 @@ return new class extends Migration
             $table->foreignId('user_id')->constrained()->cascadeOnDelete();
             $table->text('message');
             $table->string('type')->default('general');
+            $table->string('status')->default('pending');
             $table->timestamps();
         });
     }

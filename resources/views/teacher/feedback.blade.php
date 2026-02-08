@@ -82,7 +82,7 @@
                     </div>
                     <div>
                         <p class="text-slate-400 text-sm font-medium">Total Feedback</p>
-                        <p class="text-2xl font-bold text-white">{{ $feedbacks->total() }}</p>
+                        <p class="text-2xl font-bold text-white">{{ $totalFeedback }}</p>
                     </div>
                 </div>
             </div>
@@ -94,9 +94,7 @@
                     </div>
                     <div>
                         <p class="text-slate-400 text-sm font-medium">Recent (7 days)</p>
-                        <p class="text-2xl font-bold text-white">
-                            {{ $feedbacks->filter(fn($f) => $f->created_at->gt(now()->subDays(7)))->count() }}
-                        </p>
+                        <p class="text-2xl font-bold text-white">{{ $recentFeedback }}</p>
                     </div>
                 </div>
             </div>
@@ -108,9 +106,7 @@
                     </div>
                     <div>
                         <p class="text-slate-400 text-sm font-medium">Resolved</p>
-                        <p class="text-2xl font-bold text-white">
-                            {{ $feedbacks->filter(fn($f) => $f->status === 'resolved')->count() }}
-                        </p>
+                        <p class="text-2xl font-bold text-white">{{ $resolvedFeedback }}</p>
                     </div>
                 </div>
             </div>

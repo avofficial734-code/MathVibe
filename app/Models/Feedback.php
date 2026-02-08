@@ -13,6 +13,7 @@ class Feedback extends Model
         'user_id',
         'message',
         'type',
+        'status',
     ];
 
     public function user()
